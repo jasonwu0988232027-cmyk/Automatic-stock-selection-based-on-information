@@ -8,10 +8,7 @@ import pandas as pd
 st.set_page_config(page_title="AI 股市新聞分析", layout="wide")
 st.title("📈 股市漲幅排行與 Gemini AI 分析")
 
-# --- 2. 側邊欄設置 ---
-st.sidebar.header("🔑 API 設置")
-user_api_key = st.sidebar.text_input("輸入 Gemini API Key", type="password")
-st.sidebar.info(f"📅 系統日期：{datetime.now().strftime('%Y-%m-%d')}")
+
 
 # --- 3. 股市數據抓取函數 (yfinance 不需要 Key) ---
 @st.cache_data(ttl=600)
