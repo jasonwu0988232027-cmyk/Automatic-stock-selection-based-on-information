@@ -1,115 +1,86 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import google.generativeai as genai
-import json
-import plotly.express as px
+from datetime import datetime, timedelta
 
-# --- 1. 配置與完整 34 產業 (縮減展示，請保留您的完整清單) ---
-st.set_page_config(page_title="AI 產業權值百科 v18", layout="wide")
+# --- 1. 初始化設定 ---
+st.set_page_config(page_title="AI 股市漲幅分析助手", layout="wide")
 
-# 這裡建議保留您程式碼中完整的 INDUSTRY_GROUPS 字典
-INDUSTRY_GROUPS = {
-    "水泥工業": ["1101.TW", "1102.TW"], "食品工業": ["1216.TW", "1210.TW"],
-    "半導體業": ["2330.TW", "2454.TW"], "電腦周邊": ["2382.TW", "3231.TW"],
-    "航運業": ["2603.TW", "2618.TW"], "金融保險": ["2881.TW", "2882.TW"]
-    # ... 其他 28 個產業依此類推
-}
+# 請在這裡輸入您的 Gemini API Key
+# 建議從 https://aistudio.google.com/ 取得
+GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"
+genai.configure(api_key=GEMINI_API_KEY)
 
-# --- 2. 側邊欄：完整 5 權重表 (解決拉桿消失問題) ---
-st.sidebar.title("🛠️ AI 戰略配置")
-api_key = st.sidebar.text_input("輸入 Gemini API Key", type="password", key="v18_key")
+# --- 2. 定義功能函數 ---
 
-with st.sidebar.expander("⚖️ 權重分配 (五大指標)", expanded=True):
-    w_rsi = st.slider("RSI 超賣權重", 0, 100, 40)
-    w_ma = st.slider("MA 金叉權重", 0, 100, 30)
-    w_vol = st.slider("劇烈波動權重", 0, 100, 20)
-    w_vxx = st.slider("成交爆量權重", 0, 100, 10)
-    st.markdown("---")
-    w_ai = st.slider("✨ AI 產業分析權重", 0, 100, 50)
+def get_top_gainers():
+    """獲取台股今日漲幅前 10 名 (以 Yahoo Finance 示例)"""
+    # 這裡使用常見的熱門權值或特定清單模擬，因為 yf 暫無直接的 "台股漲幅排行" API
+    # 實務上可串接爬蟲或第三方 API。此處演示獲取數據邏輯：
+    tickers = ["2330.TW", "2317.TW", "2454.TW", "2303.TW", "2382.TW", "2412.TW", "2881.TW", "2882.TW", "2603.TW", "3008.TW"]
+    
+    data_list = []
+    for t in tickers:
+        stock = yf.Ticker(t)
+        hist = stock.history(period="2d")
+        if len(hist) >= 2:
+            change = (hist['Close'].iloc[-1] - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2] * 100
+            data_list.append({
+                "代碼": t,
+                "名稱": stock.info.get('shortName', t),
+                "現價": round(hist['Close'].iloc[-1], 2),
+                "漲幅%": round(change, 2)
+            })
+    
+    # 依照漲幅排序並取前10
+    df = pd.DataFrame(data_list).sort_values(by="漲幅%", ascending=False).head(10)
+    return df
 
-# --- 3. 強化的 AI 分數抓取 (解決全 50 分問題) ---
-def get_ai_score_safe(target, news_list):
-    if not api_key: return 50
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        context = " ".join(news_list)[:500] if news_list else "平淡"
-        prompt = f"分析 {target} 行情，只回傳一個 0-100 的數字數字，不要任何文字。"
+def analyze_with_gemini(stock_list):
+    """將股票清單交給 Gemini 進行聯網新聞查找與彙整"""
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    seven_days_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    
+    # 建立 Prompt
+    stock_str = ", ".join([f"{row['名稱']}({row['代碼']})" for _, row in stock_list.iterrows()])
+    
+    prompt = f"""
+    今天是 {current_date}。
+    請針對以下 10 檔目前漲幅領先的股票：{stock_str}。
+    
+    任務：
+    1. 查找這 10 檔股票在近 7 天內（{seven_days_ago} 至今）的相關重大新聞或公告。
+    2. 根據新聞內容，分析各個股票所屬「行業」目前的整體表現與成績。
+    3. 請嚴格以 Markdown 表格格式回傳，表格欄位必須包含：
+       | 股票名稱 | 所屬行業 | 近七天重大新聞摘要 | 行業成績/趨勢分析 |
+    
+    請用繁體中文回答。
+    """
+    
+    with st.spinner("Gemini 正在搜尋近 7 天新聞並分析中..."):
         response = model.generate_content(prompt)
-        # 強制提取數字，避免 JSON 解析失敗
-        import re
-        num = re.findall(r'\d+', response.text)
-        return int(num[0]) if num else 50
-    except:
-        return 50
+        return response.text
 
-# --- 4. 主執行邏輯 ---
-if st.button("🚀 啟動 34 產業全方位掃描"):
-    if not api_key:
-        st.error("請在側邊欄輸入 API Key 以啟用 AI 分析！")
-    else:
-        all_results = []
-        heat_results = []
-        progress = st.progress(0)
-        
-        # 遍歷產業
-        for idx, (ind_name, tickers) in enumerate(INDUSTRY_GROUPS.items()):
-            # A. 產業 AI 景氣分析
-            try:
-                raw_n = yf.Ticker(tickers[0]).news
-                titles = [n['title'] for n in raw_n[:2]] if raw_n else []
-            except: titles = []
-            
-            ind_score = get_ai_score_safe(ind_name, titles)
-            heat_results.append({"產業": ind_name, "景氣分數": ind_score})
-            
-            # B. 個股掃描 (五權重合一)
-            for t in tickers:
-                try:
-                    df = yf.download(t, period="60d", progress=False, auto_adjust=True)
-                    if df.empty or len(df) < 20: continue
-                    
-                    # 技術指標計算
-                    df['RSI'] = ta.rsi(df['Close'], length=14)
-                    df['MA5'] = ta.sma(df['Close'], length=5)
-                    df['MA10'] = ta.sma(df['Close'], length=10)
-                    
-                    curr, prev = df.iloc[-1], df.iloc[-2]
-                    tech_score = 0
-                    
-                    # 判斷四大技術面 (參考您的 stock_analyze.py 邏輯)
-                    if curr['RSI'] < 25: tech_score += w_rsi # RSI超賣
-                    if prev['MA5'] < prev['MA10'] and curr['MA5'] > curr['MA10']: tech_score += w_ma # 金叉
-                    
-                    chg = abs((curr['Close'] - prev['Close']) / prev['Close'] * 100)
-                    if chg >= 9.0: tech_score += w_vol # 劇烈波動
-                    
-                    if curr['Volume'] > df['Volume'].mean() * 2: tech_score += w_vxx # 成交爆量
-                    
-                    # 疊加 AI 分數 (權重轉換)
-                    final_score = tech_score + ((ind_score - 50) / 50 * w_ai)
-                    
-                    all_results.append({
-                        "產業": ind_name, "名稱": t, "總分": round(final_score, 1),
-                        "現價": round(float(curr['Close']), 2), "AI景氣": f"{ind_score}分"
-                    })
-                except: continue
-            progress.progress((idx + 1) / len(INDUSTRY_GROUPS))
+# --- 3. Streamlit 介面渲染 ---
 
-        # --- 5. 輸出結果 ---
-        st.subheader("📊 34 產業 AI 景氣熱力圖")
-        if heat_results:
-            df_heat = pd.DataFrame(heat_results)
-            # 使用不同的顏色對應分數，讓熱力圖動起來
-            fig = px.bar(df_heat, x="產業", y="景氣分數", color="景氣分數", 
-                         range_y=[0, 100], color_continuous_scale="RdYlGn", text_auto=True)
-            st.plotly_chart(fig, use_container_width=True)
+st.title("🚀 今日股市漲幅 Top 10 與 AI 深度分析")
+st.write(f"目前時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-        st.subheader("🏆 全權重優選標的")
-        if all_results:
-            df_final = pd.DataFrame(all_results).sort_values("總分", ascending=False)
-            st.dataframe(df_final, use_container_width=True)
-        else:
-            st.warning("掃描完成，但目前的權重設定下沒有推薦標的。")
+if st.button("開始獲取數據並分析"):
+    # 步驟 1 & 2: 獲取日期與漲幅排行
+    top_stocks = get_top_gainers()
+    
+    st.subheader("📈 當前漲幅排行前 10 名")
+    st.table(top_stocks)
+    
+    # 步驟 3 & 4: 詢問 Gemini 並展示表格
+    analysis_result = analyze_with_gemini(top_stocks)
+    
+    st.subheader("🤖 Gemini AI 行業成績彙整分析")
+    st.markdown(analysis_result)
+
+else:
+    st.info("請點擊上方按鈕開始自動化流程。")
