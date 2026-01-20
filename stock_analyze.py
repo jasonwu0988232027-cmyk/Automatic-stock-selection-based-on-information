@@ -7,7 +7,7 @@ import json
 import time
 import plotly.express as px
 
-# --- 1. 網頁配置與全產業資料庫 ---
+# --- 1. 網頁配置與資料庫 (整合您的 34 個產業) ---
 st.set_page_config(page_title="AI 產業戰略百科 v16", layout="wide")
 
 # --- 1. 股票字典與連動映射表 ---
@@ -58,81 +58,93 @@ CORRELATION_MAP = {
     "MSFT": ["2330.TW", "2382.TW", "6669.TW"],                      
     "GOOGL": ["2330.TW", "2382.TW", "3231.TW"]                      
 }
-# --- 2. 側邊欄：全域配置 (修復 Duplicate Widget ID) ---
-st.sidebar.title("🛠️ AI 戰略配置")
-# 將 API Key 移到這裡，確保整個程式碼只會產生一個 ID
+# --- 2. 側邊欄：全域配置 (徹底解決 Duplicate Widget ID 問題) ---
+st.sidebar.title("🛠️ 全域 AI 配置")
+# 在這裡輸入您從 Google AI Studio 獲得的 API Key
 api_key = st.sidebar.text_input("輸入 Gemini API Key", type="password", key="main_api_key")
 
 with st.sidebar.expander("⚖️ 權重分配", expanded=True):
     w_rsi = st.slider("RSI 超賣權重", 0, 100, 30)
     w_ma = st.slider("MA 金叉權重", 0, 100, 20)
-    w_news = st.slider("AI 資訊分析權重", 0, 100, 50) # 提高 AI 權重
+    w_news = st.slider("AI 資訊分析權重", 0, 100, 50)
 
-# --- 3. AI 分析核心函數 ---
-def get_ai_analysis(target, news_list, mode="industry"):
-    if not api_key: return {"score": 50, "reason": "未輸入 API Key"}
+# --- 3. AI 分析引擎 ---
+def get_ai_score(target, news_list, mode="industry"):
+    if not api_key: return {"score": 50, "reason": "未配置 API Key"}
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
-        context = " ".join(news_list) if news_list else "暫無新聞"
+        context = " ".join(news_list) if news_list else "暫無近期重大消息"
         
-        prompt = f"分析 {target} 的近期消息：{context}。請評估其對股價的正面影響程度 (0-100)。格式：{{'score': 分數, 'reason': '一句話總結'}}"
+        prompt = f"分析 {target} 的消息：{context}。評估其對股價影響 (0-100)。回傳 JSON 格式: {{'score': 分數, 'reason': '一句話分析'}}"
         response = model.generate_content(prompt)
-        # 清理並解析 JSON
-        res_text = response.text.replace('```json', '').replace('```', '').strip()
-        return json.loads(res_text)
+        # 清理回傳字串
+        clean_json = response.text.replace('```json', '').replace('```', '').strip()
+        return json.loads(clean_json)
     except:
-        return {"score": 50, "reason": "分析發生錯誤"}
+        return {"score": 50, "reason": "AI 分析引擎異常"}
 
-# --- 4. 執行掃描邏輯 ---
+# --- 4. 核心掃描執行 ---
 if st.button("🚀 啟動全產業 AI 戰略掃描"):
     if not api_key:
-        st.error("請先在側邊欄輸入 API Key！")
+        st.error("請在側邊欄填入您的 API Key！")
     else:
-        all_stock_results = []
-        industry_heat_data = []
+        all_results = []
+        heat_results = []
+        progress = st.progress(0)
         
-        # A. 評估美股連動影響
-        st.write("Step 1: 正在分析美股龍頭對台連動影響...")
-        us_impact_scores = {}
+        # A. 分析美股環境
+        st.info("正在分析美股龍頭對台連動影響...")
+        us_scores = {}
         for us_ticker, tw_list in CORRELATION_MAP.items():
             try:
-                us_news = [n['title'] for n in yf.Ticker(us_ticker).news[:2]]
-                res = get_ai_analysis(f"美股 {us_ticker} 對台股供應鏈", us_news)
-                for tw_id in tw_list:
-                    us_impact_scores[tw_id] = res['score']
+                raw_n = yf.Ticker(us_ticker).news
+                # 安全獲取新聞標題，修復 KeyError
+                titles = [n['title'] for n in raw_n[:2]] if raw_n else []
+                res = get_ai_score(f"美股 {us_ticker} 對台影響", titles)
+                for t in tw_list: us_scores[t] = res['score']
             except: pass
 
         # B. 產業景氣與個股掃描
-        st.write("Step 2: 執行 34 個產業景氣與個股掃描...")
-        progress = st.progress(0)
-        
-        for i, (ind_name, tickers) in enumerate(INDUSTRY_GROUPS.items()):
-            # 獲取產業整體分數 (修復 KeyError)
+        for idx, (ind_name, tickers) in enumerate(INDUSTRY_GROUPS.items()):
+            # 獲取行業新聞
             ind_news = []
             for t in tickers[:2]:
                 try:
-                    raw_news = yf.Ticker(t).news
-                    if raw_news: ind_news.append(raw_news[0]['title'])
+                    raw_n = yf.Ticker(t).news
+                    if raw_n: ind_news.append(raw_n[0]['title'])
                 except: continue
             
-            ind_eval = get_ai_analysis(ind_name, ind_news)
-            industry_heat_data.append({"產業": ind_name, "景氣分數": ind_eval['score']})
+            # 行業景氣評分 (熱度圖數據)
+            ind_eval = get_ai_score(ind_name, ind_news, mode="industry")
+            heat_results.append({"產業": ind_name, "AI景氣分": ind_eval['score']})
             
-            # 個股計算
-            for t in tickers[:3]:
+            # 掃描個股
+            for t in tickers:
                 try:
                     df = yf.download(t, period="60d", progress=False, auto_adjust=True)
                     if df.empty: continue
-                    
                     df['RSI'] = ta.rsi(df['Close'], length=14)
-                    curr_rsi = df['RSI'].iloc[-1]
                     
-                    # 綜合評分 = 技術面 + (美股影響 * 0.4 + 產業景氣 * 0.6) 的加權
-                    info_base = (us_impact_scores.get(t, 50) * 0.4 + ind_eval['score'] * 0.6)
-                    info_score = (info_base - 50) / 50 * w_news
-                    tech_score = (w_rsi if curr_rsi < 35 else 0)
+                    # 技術分 + 資訊分 (美股加權 40% + 產業加權 60%)
+                    info_base = (us_scores.get(t, 50) * 0.4 + ind_eval['score'] * 0.6)
+                    final_score = (w_rsi if df['RSI'].iloc[-1] < 30 else 0) + ((info_base - 50) / 50 * w_news)
                     
-                    all_stock_results.append({
-                        "產業": ind_name, "代碼": t, "總分": round(tech_score + info_score, 1),
-                        "現價": round(float(df['Close
+                    all_results.append({
+                        "產業": ind_name, "標的": t, "總分": round(final_score, 1),
+                        "價格": round(float(df['Close'].iloc[-1]), 2), "AI短評": ind_eval['reason']
+                    })
+                except: continue
+            progress.progress((idx + 1) / len(INDUSTRY_GROUPS))
+
+        # --- 5. 產業熱力圖呈現 ---
+        st.subheader("📊 產業 AI 景氣熱力分布")
+        df_heat = pd.DataFrame(heat_results)
+        fig = px.bar(df_heat, x="產業", y="AI景氣分", color="AI景氣分", 
+                     color_continuous_scale="RdYlGn", text_auto=True)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # --- 6. 掃描結果表 ---
+        st.subheader("🏆 全產業優選標的")
+        df_final = pd.DataFrame(all_results).sort_values("總分", ascending=False)
+        st.dataframe(df_final, use_container_width=True)
