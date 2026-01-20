@@ -7,7 +7,7 @@ import json
 import time
 import plotly.express as px
 
-# --- 1. 網頁配置與資料庫 ---
+# --- 1. 網頁配置與全產業資料庫 ---
 st.set_page_config(page_title="AI 產業戰略百科 v16", layout="wide")
 
 # --- 1. 股票字典與連動映射表 ---
@@ -58,88 +58,81 @@ CORRELATION_MAP = {
     "MSFT": ["2330.TW", "2382.TW", "6669.TW"],                      
     "GOOGL": ["2330.TW", "2382.TW", "3231.TW"]                      
 }
-
-# --- 2. 側邊欄：全域配置 (避免重複 ID 錯誤) ---
-st.sidebar.title("🛠️ 全域配置")
-api_key = st.sidebar.text_input("輸入 Gemini API Key", type="password", key="gemini_api_key")
-auto_threshold = st.sidebar.slider("推薦門檻 (分)", 10, 100, 40)
+# --- 2. 側邊欄：全域配置 (修復 Duplicate Widget ID) ---
+st.sidebar.title("🛠️ AI 戰略配置")
+# 將 API Key 移到這裡，確保整個程式碼只會產生一個 ID
+api_key = st.sidebar.text_input("輸入 Gemini API Key", type="password", key="main_api_key")
 
 with st.sidebar.expander("⚖️ 權重分配", expanded=True):
-    w_rsi = st.slider("RSI 超賣", 0, 100, 30)
-    w_ma = st.slider("MA 金叉", 0, 100, 20)
-    w_vol = st.slider("劇烈波動", 0, 100, 15)
-    w_news = st.slider("AI 資訊面權重", 0, 100, 35)
+    w_rsi = st.slider("RSI 超賣權重", 0, 100, 30)
+    w_ma = st.slider("MA 金叉權重", 0, 100, 20)
+    w_news = st.slider("AI 資訊分析權重", 0, 100, 50) # 提高 AI 權重
 
-# --- 3. AI 分析核心 ---
-def get_ai_score(target, context, mode="single"):
-    if not api_key: return {"score": 50, "reason": "未填寫 API"}
+# --- 3. AI 分析核心函數 ---
+def get_ai_analysis(target, news_list, mode="industry"):
+    if not api_key: return {"score": 50, "reason": "未輸入 API Key"}
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
+        context = " ".join(news_list) if news_list else "暫無新聞"
         
-        prompts = {
-            "single": f"分析{target}新聞，給予0-100分(50中立)。格式:{{'score':x, 'reason':''}}",
-            "industry": f"分析{target}行業趨勢，給予景氣分(0-100)。格式:{{'score':x, 'reason':''}}",
-            "impact": f"分析美股新聞對台股供應鏈{target}的影響。格式:{{'score':x, 'reason':''}}"
-        }
-        
-        response = model.generate_content(f"{prompts[mode]}\n新聞內容：{context}")
-        return json.loads(response.text.replace('```json', '').replace('```', '').strip())
-    except: return {"score": 50, "reason": "AI 分析超時"}
+        prompt = f"分析 {target} 的近期消息：{context}。請評估其對股價的正面影響程度 (0-100)。格式：{{'score': 分數, 'reason': '一句話總結'}}"
+        response = model.generate_content(prompt)
+        # 清理並解析 JSON
+        res_text = response.text.replace('```json', '').replace('```', '').strip()
+        return json.loads(res_text)
+    except:
+        return {"score": 50, "reason": "分析發生錯誤"}
 
-# --- 4. 掃描邏輯 ---
-if st.button("🚀 啟動全產業 AI 戰略分析"):
+# --- 4. 執行掃描邏輯 ---
+if st.button("🚀 啟動全產業 AI 戰略掃描"):
     if not api_key:
         st.error("請先在側邊欄輸入 API Key！")
     else:
-        # A. 美股影響分析
-        st.info("正在評估美股龍頭對台連動影響...")
-        us_impact = {}
-        for us_t, tw_list in CORRELATION_MAP.items():
-            news = yf.Ticker(us_t).news[:2]
-            res = get_ai_score(tw_list, news, mode="impact")
-            for t in tw_list: us_impact[t] = res['score']
+        all_stock_results = []
+        industry_heat_data = []
+        
+        # A. 評估美股連動影響
+        st.write("Step 1: 正在分析美股龍頭對台連動影響...")
+        us_impact_scores = {}
+        for us_ticker, tw_list in CORRELATION_MAP.items():
+            try:
+                us_news = [n['title'] for n in yf.Ticker(us_ticker).news[:2]]
+                res = get_ai_analysis(f"美股 {us_ticker} 對台股供應鏈", us_news)
+                for tw_id in tw_list:
+                    us_impact_scores[tw_id] = res['score']
+            except: pass
 
-        # B. 產業掃描與熱力圖數據
-        ind_data = []
-        stock_results = []
+        # B. 產業景氣與個股掃描
+        st.write("Step 2: 執行 34 個產業景氣與個股掃描...")
         progress = st.progress(0)
         
-        for idx, (ind_name, tickers) in enumerate(INDUSTRY_GROUPS.items()):
-            # 取得行業景氣分
-            ind_news = [n['title'] for t in tickers[:2] for n in yf.Ticker(t).news[:1]]
-            ind_res = get_ai_score(ind_name, ind_news, mode="industry")
-            ind_data.append({"產業": ind_name, "景氣分數": ind_res['score']})
+        for i, (ind_name, tickers) in enumerate(INDUSTRY_GROUPS.items()):
+            # 獲取產業整體分數 (修復 KeyError)
+            ind_news = []
+            for t in tickers[:2]:
+                try:
+                    raw_news = yf.Ticker(t).news
+                    if raw_news: ind_news.append(raw_news[0]['title'])
+                except: continue
             
-            # 掃描個股
+            ind_eval = get_ai_analysis(ind_name, ind_news)
+            industry_heat_data.append({"產業": ind_name, "景氣分數": ind_eval['score']})
+            
+            # 個股計算
             for t in tickers[:3]:
                 try:
                     df = yf.download(t, period="60d", progress=False, auto_adjust=True)
                     if df.empty: continue
-                    # 技術指標
+                    
                     df['RSI'] = ta.rsi(df['Close'], length=14)
-                    curr, prev = df.iloc[-1], df.iloc[-2]
+                    curr_rsi = df['RSI'].iloc[-1]
                     
-                    tech_s = 0
-                    if curr['RSI'] < 35: tech_s += w_rsi
+                    # 綜合評分 = 技術面 + (美股影響 * 0.4 + 產業景氣 * 0.6) 的加權
+                    info_base = (us_impact_scores.get(t, 50) * 0.4 + ind_eval['score'] * 0.6)
+                    info_score = (info_base - 50) / 50 * w_news
+                    tech_score = (w_rsi if curr_rsi < 35 else 0)
                     
-                    # 整合資訊面 (美股影響 40% + 產業景氣 60%)
-                    final_info = (us_impact.get(t, 50) * 0.4 + ind_res['score'] * 0.6)
-                    info_weighted = (final_info - 50) / 50 * w_news
-                    
-                    total = tech_s + info_weighted
-                    stock_results.append({
-                        "代碼": t, "總分": round(total, 1), "現價": round(float(curr['Close']), 2),
-                        "產業": ind_name, "AI評點": ind_res['reason']
-                    })
-                except: continue
-            progress.progress((idx + 1) / len(INDUSTRY_GROUPS))
-
-        # --- 5. 視覺化呈現 ---
-        st.subheader("📊 全產業 AI 景氣熱力圖")
-        fig = px.bar(pd.DataFrame(ind_data), x="產業", y="景氣分數", color="景氣分數", color_continuous_scale="RdYlGn")
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("🏆 策略推薦標的")
-        df_final = pd.DataFrame(stock_results).sort_values("總分", ascending=False)
-        st.dataframe(df_final[df_final['總分'] >= auto_threshold], use_container_width=True)
+                    all_stock_results.append({
+                        "產業": ind_name, "代碼": t, "總分": round(tech_score + info_score, 1),
+                        "現價": round(float(df['Close
