@@ -13,10 +13,9 @@ st.sidebar.header("🔑 API 設置")
 user_api_key = st.sidebar.text_input("輸入 Gemini API Key", type="password")
 st.sidebar.info(f"📅 系統日期：{datetime.now().strftime('%Y-%m-%d')}")
 
-# --- 3. 股市數據抓取函數 (yfinance 不需要 Key) ---
+# --- 3. 股市數據抓取 ---
 @st.cache_data(ttl=600)
 def get_market_data():
-    # 預設熱門美股清單
     tickers = ["NVDA", "TSLA", "AAPL", "AMD", "MSFT", "GOOGL", "AMZN", "META", "AVGO", "SMCI"]
     data = []
     for t in tickers:
@@ -30,14 +29,14 @@ def get_market_data():
         except: continue
     return pd.DataFrame(data).sort_values("漲幅%", ascending=False).head(10)
 
-# --- 4. 主介面：顯示股市數據 ---
+# 顯示表格
 st.subheader("🔥 今日漲幅排行前 10")
 df_top10 = get_market_data()
 st.dataframe(df_top10, use_container_width=True, hide_index=True)
 
 st.divider()
 
-# --- 5. AI 分析邏輯 ---
+# --- 4. AI 分析邏輯 ---
 st.subheader("🤖 AI 近七天新聞深度分析")
 
 if st.button("🚀 執行 AI 檢索 (需 API Key)"):
@@ -45,12 +44,15 @@ if st.button("🚀 執行 AI 檢索 (需 API Key)"):
         st.error("❌ 請先在左側輸入您的 Gemini API Key。")
     else:
         try:
-            # 配置 Gemini
             genai.configure(api_key=user_api_key)
             
-            # 【關鍵修正】：使用最基礎的模型名稱，避免 404 錯誤
-            # 行號參考：約在第 56 行
-            model = genai.GenerativeModel('gemini-1.5-flash') 
+            # 【終極相容性修正】：嘗試不同的模型名稱路徑
+            try:
+                model = genai.GenerativeModel(model_name='models/gemini-1.5-flash')
+                # 測試生成
+                model.generate_content("test", generation_config={"max_output_tokens": 1})
+            except:
+                model = genai.GenerativeModel(model_name='models/gemini-pro')
             
             for _, row in df_top10.iterrows():
                 ticker = row['代碼']
@@ -61,13 +63,7 @@ if st.button("🚀 執行 AI 檢索 (需 API Key)"):
                         st.markdown(response.text)
         
         except Exception as e:
-            # 擷取具體錯誤訊息
-            error_msg = str(e)
-            if "404" in error_msg:
-                st.error("⚠️ 404 錯誤：模型名稱不匹配。請確認您的 SDK 版本已更新。")
-            elif "403" in error_msg:
-                st.error("⚠️ 403 錯誤：您的 IP 地區不支援（請嘗試切換 VPN 至美國/台灣）。")
-            else:
-                st.error(f"⚠️ 發生錯誤：{error_msg}")
+            st.error(f"⚠️ 執行失敗。錯誤訊息：{str(e)}")
+            st.info("提示：如果持續出現 404，請確認您的 API Key 是否在 Google AI Studio 中可以正常使用。")
 
 st.caption("數據來源：yfinance & Google Gemini | 本工具不構成投資建議。")
