@@ -3,89 +3,96 @@ import yfinance as yf
 import pandas as pd
 import google.generativeai as genai
 from datetime import datetime, timedelta
+import time
 
-# --- 1. 初始化設定 ---
-st.set_page_config(page_title="股市 AI 分析助手", layout="wide")
+# --- 1. 頁面配置 ---
+st.set_page_config(page_title="股市 AI 分析儀", layout="wide")
 
-# 側邊欄配置 API Key
-GEMINI_API_KEY = st.sidebar.text_input("輸入 Gemini API Key", type="password")
+# --- 2. 側邊欄：安全輸入 ---
+with st.sidebar:
+    st.header("設置")
+    api_key = st.text_input("請輸入 Gemini API Key", type="password")
+    # 允許用戶切換模型，增加靈活性
+    model_choice = st.selectbox("選擇 AI 模型", ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"])
 
-# --- 2. 核心功能函數 ---
-
-@st.cache_data(ttl=3600)  # 緩存一小時，防止頻繁請求被 Yahoo 封鎖
-def get_stock_ranking():
-    """獲取台股預設清單的漲幅數據"""
-    # 預設熱門股，減少請求壓力
-    tickers = ["2330.TW", "2317.TW", "2454.TW", "2303.TW", "2382.TW", 
-               "2412.TW", "2881.TW", "2882.TW", "2603.TW", "3008.TW"]
+# --- 3. 核心功能：穩定的股市數據抓取 ---
+@st.cache_data(ttl=3600)  # 緩存 1 小時，這是解決 RateLimit 的關鍵
+def fetch_stock_data():
+    # 預設台股前 10 大權值股，避免全市場掃描觸發封鎖
+    target_stocks = ["2330.TW", "2317.TW", "2454.TW", "2303.TW", "2382.TW", 
+                     "2412.TW", "2881.TW", "2882.TW", "2603.TW", "3008.TW"]
     
-    results = []
-    # 使用一次性下載模式更穩定
-    data = yf.download(tickers, period="2d", group_by='ticker', progress=False)
-    
-    for t in tickers:
-        try:
-            # 取得該股的 Close 序列
-            s_data = data[t]['Close']
-            if len(s_data) >= 2:
-                now = s_data.iloc[-1]
-                prev = s_data.iloc[-2]
-                change = ((now - prev) / prev) * 100
-                results.append({"股票代碼": t, "現價": round(now, 2), "漲幅%": round(change, 2)})
-        except:
-            continue
-            
-    df = pd.DataFrame(results).sort_values(by="漲幅%", ascending=False).head(10)
-    return df
-
-def ask_gemini_analysis(stock_df):
-    """詢問 Gemini 關於新聞與行業的分析"""
-    if not GEMINI_API_KEY:
-        return "請提供 API Key 以進行分析。"
-    
-    genai.configure(api_key=GEMINI_API_KEY)
-    
-    # 修正 404 錯誤：使用最通用的 'gemini-pro' 或 'models/gemini-1.5-flash-latest'
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        # 使用下載模式而非 Ticker 模式，減少 Connection 數量
+        data = yf.download(target_stocks, period="2d", interval="1d", progress=False)
         
-        stock_list_str = ", ".join(stock_df["股票代碼"].tolist())
+        stock_list = []
+        for ticker in target_stocks:
+            if ticker in data['Close']:
+                prices = data['Close'][ticker].dropna()
+                if len(prices) >= 2:
+                    current_price = prices.iloc[-1]
+                    prev_price = prices.iloc[-2]
+                    change_pct = ((current_price - prev_price) / prev_price) * 100
+                    stock_list.append({
+                        "代碼": ticker,
+                        "價格": round(current_price, 2),
+                        "漲跌幅(%)": round(change_pct, 2)
+                    })
+        
+        return pd.DataFrame(stock_list).sort_values(by="漲跌幅(%)", ascending=False)
+    except Exception as e:
+        st.error(f"股市數據讀取失敗: {e}")
+        return pd.DataFrame()
+
+# --- 4. 核心功能：AI 分析 (修正 404 錯誤) ---
+def get_ai_analysis(df, key, model_name):
+    if not key:
+        return "請先輸入 API Key。"
+    
+    genai.configure(api_key=key)
+    
+    # 修正模型名稱調用邏輯
+    try:
+        # 針對 404 錯誤，改用最基礎的模型字串，不加 -latest
+        model = genai.GenerativeModel(model_name)
+        
         prompt = f"""
-        今天是 {datetime.now().strftime('%Y-%m-%d')}。
-        請針對這10檔漲幅領先股票進行分析：{stock_list_str}。
-        1. 搜尋近 7 天內關於這些股票或其所屬產業的重大新聞。
-        2. 整理成一個 Markdown 表格。
-        3. 表格欄位：| 股票名稱 | 所屬行業 | 近七天新聞摘要 | 行業成績/前景分析 |
-        請使用繁體中文。
+        現在日期：{datetime.now().strftime('%Y-%m-%d')}
+        分析目標股票清單：{df['代碼'].tolist()}
+        
+        任務：
+        1. 檢索過去 7 天內關於這些股票的重大新聞。
+        2. 分析各股票所屬行業的成績與趨勢。
+        3. 輸出一個 Markdown 表格，包含：股票名稱、行業、近七天新聞摘要、行業表現評分。
+        
+        語言：繁體中文。
         """
         
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"Gemini 分析出錯：{str(e)}。建議確認 API Key 是否有效，或嘗試更換模型名稱。"
+        return f"AI 分析發生錯誤: {str(e)}\n建議：請確認 API Key 是否擁有該模型的存取權限。"
 
-# --- 3. Streamlit UI 介面 ---
+# --- 5. Streamlit 主介面 ---
+st.title("📈 股市即時漲幅與行業分析報告")
+st.info(f"📅 目前時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-st.title("🚀 股市漲幅 Top 10 與 AI 深度分析")
-st.write(f"當前查詢時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-if st.button("開始執行自動化分析"):
-    if not GEMINI_API_KEY:
-        st.error("請在側邊欄填寫您的 Gemini API Key！")
-    else:
-        # 第一步：獲取數據
-        with st.spinner("正在獲取股市數據..."):
-            top_df = get_stock_ranking()
-            
-        if not top_df.empty:
-            st.subheader("📈 今日漲幅前 10 名 (範例清單)")
-            st.dataframe(top_df, use_container_width=True)
+if st.button("執行分析任務"):
+    # 第一步：顯示漲幅
+    with st.status("獲取行情數據中...") as status:
+        top_stocks_df = fetch_stock_data()
+        if not top_stocks_df.empty:
+            status.update(label="行情數據獲取成功！", state="complete")
+            st.subheader("🔥 今日漲幅排行 (Top 10)")
+            st.dataframe(top_stocks_df, use_container_width=True)
             
             # 第二步：AI 分析
-            with st.spinner("Gemini 正在搜尋新聞並整理表格..."):
-                report = ask_gemini_analysis(top_df)
-                st.divider()
-                st.subheader("🤖 AI 行業分析報告 (近七天新聞整理)")
-                st.markdown(report)
+            st.divider()
+            st.subheader("🤖 Gemini AI 行業成績整理")
+            with st.spinner("AI 正在查找新聞並分析行業成績..."):
+                analysis_report = get_ai_analysis(top_stocks_df, api_key, model_choice)
+                st.markdown(analysis_report)
         else:
-            st.error("無法從 Yahoo Finance 獲取數據。這通常是 IP 被暫時限制，請稍後再試或更換網路環境。")
+            status.update(label="數據獲取失敗，可能被 Yahoo 暫時限流。", state="error")
+            st.warning("提示：請嘗試更換網路環境（如手機熱點）或稍後再試。")
