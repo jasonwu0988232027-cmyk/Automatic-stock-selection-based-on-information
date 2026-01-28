@@ -12,14 +12,14 @@ def get_test_list():
             "2881.TW", "2882.TW", "2603.TW", "3711.TW", "2412.TW"]
 
 st.title("🧪 台股快速測試版 (10 隻股票)")
-st.caption("結果將重點顯示【成交金額(億)】")
+st.caption("目標：快速驗證「成交值」欄位顯示")
 
 if st.button("執行極速掃描"):
     tickers = get_test_list()
     st.info(f"正在掃描：{tickers}")
     
     try:
-        # 下載數據 (移除 silent 以確保相容性)
+        # 下載數據
         df = yf.download(tickers, period="5d", group_by='ticker', threads=False)
         
         results = []
@@ -28,20 +28,22 @@ if st.button("執行極速掃描"):
             if not t_df.empty:
                 last = t_df.iloc[-1]
                 price = float(last['Close'])
-                volume = float(last['Volume'])
-                turnover_billion = (price * volume) / 100_000_000 # 計算成交值
+                vol = float(last['Volume'])
+                # 成交值計算
+                turnover = (price * vol) / 100_000_000
                 
                 results.append({
                     "股票代號": t,
-                    "當前股價": round(price, 2),
-                    "成交金額(億)": round(turnover_billion, 3)
+                    "收盤價": round(price, 2),
+                    "成交量(張)": int(vol // 1000),
+                    "成交金額(億)": round(turnover, 3)
                 })
         
         if results:
-            st.success("✅ 測試成功！資料如下：")
-            res_df = pd.DataFrame(results).sort_values("成交金額(億)", ascending=False)
-            st.table(res_df) # 使用表格直接呈現關鍵數據
+            st.success("✅ 測試成功！")
+            st.table(pd.DataFrame(results).sort_values("成交金額(億)", ascending=False))
         else:
-            st.error("❌ 抓取失敗：數據返回為空。")
+            st.error("❌ 抓取失敗：返回數據為空。")
     except Exception as e:
         st.error(f"❌ 發生錯誤：{e}")
+        
