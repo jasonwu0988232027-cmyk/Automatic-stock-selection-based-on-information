@@ -7,91 +7,129 @@ import requests
 import urllib3
 from datetime import datetime
 
+# --- 安全與基礎配置 ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-st.set_page_config(page_title="台股成交值指標 Top 100", layout="wide")
+st.set_page_config(page_title="台股指標排行榜", layout="wide")
 
-@st.cache_data(ttl=86400)
-def get_all_tickers():
+@st.cache_data(ttl=3600) # 緩存 1 小時，避免頻繁請求證交所
+def get_safe_tickers():
     url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+    }
     try:
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, verify=False, timeout=15)
-        res.encoding = 'big5'
-        df = pd.read_html(res.text)[0]
+        response = requests.get(url, headers=headers, timeout=15, verify=False)
+        response.encoding = 'big5'
+        # 使用多種解析引擎重試
+        try:
+            tables = pd.read_html(response.text, flavor='lxml')
+        except:
+            tables = pd.read_html(response.text, flavor='html5lib')
+            
+        df = tables[0]
         df.columns = df.iloc[0]
         df = df[df['有價證券代號及名稱'].str.contains("  ", na=False)]
-        return [f"{t.split('  ')[0]}.TW" for t in df['有價證券代號及名稱'] if len(t.split('  ')[0]) == 4]
-    except: return ["2330.TW", "2317.TW", "2454.TW"]
+        # 篩選標準 4 碼台股
+        list_tickers = []
+        for item in df['有價證券代號及名稱']:
+            code = item.split("  ")[0].strip()
+            if code.isdigit() and len(code) == 4:
+                list_tickers.append(f"{code}.TW")
+        return list_tickers
+    except Exception as e:
+        st.error(f"無法獲取名單: {e}")
+        return []
 
-def fetch_data(tickers):
-    all_res = []
-    batch_size = 20
+def fetch_data_robust(tickers):
+    all_results = []
+    batch_size = 15 # 縮小批次提高穩定性
     p_bar = st.progress(0)
     status_text = st.empty()
     
     for i in range(0, len(tickers), batch_size):
         batch = tickers[i : i + batch_size]
-        status_text.text(f"⏳ 正在篩選全市場資金標的: {i} / {len(tickers)}...")
+        status_text.text(f"📊 正在分析指標: {i} / {len(tickers)} ...")
+        
         try:
-            df = yf.download(batch, period="5d", group_by='ticker', threads=False)
+            # 請求 5 天數據以防假日無數據
+            df = yf.download(batch, period="5d", group_by='ticker', threads=False, timeout=20)
+            
             for t in batch:
                 try:
+                    # 判斷多股票下載後的結構
                     t_df = df[t].dropna() if isinstance(df.columns, pd.MultiIndex) else df.dropna()
+                    
                     if not t_df.empty:
                         last = t_df.iloc[-1]
-                        p, v = float(last['Close']), float(last['Volume'])
-                        val = round((p * v) / 100_000_000, 2)
+                        price = float(last['Close'])
+                        volume = float(last['Volume'])
+                        # 成交值指標 (億)
+                        val = round((price * volume) / 100_000_000, 2)
+                        
                         if val > 0:
-                            all_res.append({
-                                "股票代號": t, 
-                                "收盤價": round(p, 2), 
-                                "成交量(張)": int(v // 1000), 
-                                "成交金額(億)": val, 
+                            all_results.append({
+                                "股票代號": t,
+                                "收盤價": round(price, 2),
+                                "成交量(張)": int(volume // 1000),
+                                "成交金額(億)": val,
                                 "成交值指標": val
                             })
                 except: continue
-        except: pass
-        time.sleep(random.uniform(1.0, 2.0))
+        except:
+            st.warning(f"批次 {i} 抓取超時，自動跳過...")
+            
+        time.sleep(random.uniform(1.2, 2.5)) # 隨機延遲預防封鎖
         p_bar.progress(min((i + batch_size) / len(tickers), 1.0))
-    
-    status_text.text("✅ 全市場指標計算完畢")
-    return pd.DataFrame(all_res)
+        
+    status_text.text("✅ 分析完成")
+    return pd.DataFrame(all_results)
 
-# --- UI 介面 ---
+# --- Streamlit 主介面 ---
 st.title("📊 台股成交值指標 Top 100 排行榜")
-st.markdown("本表依據 **[成交值指標]** 由高至低排序，挑選市場資金最集中的前 100 名。")
+st.info("本系統會掃描全市場，並依據「成交值指標」由高至低排列前 100 名。")
 
-if 'last_run' not in st.session_state: st.session_state.last_run = 0
+if 'last_run' not in st.session_state:
+    st.session_state.last_run = 0
+
 time_diff = time.time() - st.session_state.last_run
 
-if st.button("🚀 執行全市場掃描", type="primary"):
+if st.button("🚀 開始執行全市場篩選", type="primary"):
     if time_diff < 300:
         st.error(f"🛑 系統冷卻中，請等待 {int(300 - time_diff)} 秒。")
     else:
         st.session_state.last_run = time.time()
-        tickers = get_all_tickers()
-        df_raw = fetch_data(tickers)
         
-        if not df_raw.empty:
-            # 關鍵步驟：依照成交值指標進行排序並取前 100 名
-            top_100 = df_raw.sort_values("成交值指標", ascending=False).head(100).reset_index(drop=True)
-            top_100.index += 1 # 排名從 1 開始
+        with st.status("正在獲取台股清單...", expanded=False):
+            all_list = get_safe_tickers()
+        
+        if all_list:
+            st.write(f"🔍 成功獲取 {len(all_list)} 隻股票，開始計算指標...")
+            final_df = fetch_data_robust(all_list)
             
-            st.subheader(f"🏆 資金熱點 Top 100 ({datetime.now().strftime('%Y-%m-%d')})")
-            
-            # 格式化所有數值欄位為兩位小數並加上漸層色
-            cols_to_format = ["收盤價", "成交金額(億)", "成交值指標"]
-            try:
-                styled_df = top_100.style.format({c: "{:.2f}" for c in cols_to_format})\
-                                       .background_gradient(subset=['成交值指標'], cmap='YlOrRd')
-                st.dataframe(styled_df, use_container_width=True)
-            except:
-                st.dataframe(top_100, use_container_width=True)
+            if not final_df.empty:
+                # 關鍵：依照指標排序並取前 100 名
+                top_100 = final_df.sort_values("成交值指標", ascending=False).head(100).reset_index(drop=True)
+                top_100.index += 1
                 
-            # 提供 CSV 下載
-            csv_data = top_100.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 下載成交值指標報表", data=csv_data, file_name="Stock_Top100_Indicator.csv")
+                st.subheader(f"🏆 資金熱點 Top 100 ({datetime.now().strftime('%Y-%m-%d')})")
+                
+                # 格式化顯示
+                try:
+                    styled = top_100.style.format({
+                        "收盤價": "{:.2f}", 
+                        "成交金額(億)": "{:.2f}", 
+                        "成交值指標": "{:.2f}"
+                    }).background_gradient(subset=['成交值指標'], cmap='YlOrRd')
+                    st.dataframe(styled, use_container_width=True)
+                except:
+                    st.dataframe(top_100, use_container_width=True)
+                
+                csv = top_100.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("📥 下載排行榜 CSV", data=csv, file_name="TW_Stock_Indicator.csv")
+            else:
+                st.error("掃描結果為空，可能是連線被 Yahoo 阻斷，請稍後再試。")
         else:
-            st.error("無法獲取數據，請確認網路連線。")
+            st.error("名單獲取失敗，請檢查證交所連線狀態。")
 
 st.divider()
-st.caption("註：成交值指標計算方式為 (成交單價 × 當日總成交股數) / 10^8，單位為億元。")
+st.caption("備註：所有數據均四捨五入至小數點第 2 位。")
