@@ -12,11 +12,11 @@ from datetime import datetime
 
 # --- 基礎配置 ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-st.set_page_config(page_title="台股多因子量化交易系統", layout="wide")
+st.set_page_config(page_title="台股全面掃描交易系統", layout="wide")
 
 DB_FILE = "portfolio.json"
 
-# --- 1. 持倉管理 ---
+# 持倉管理
 def load_portfolio():
     if os.path.exists(DB_FILE):
         try:
@@ -30,10 +30,10 @@ def save_portfolio(data):
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = load_portfolio()
 
-# --- 2. 核心選股模組：採用您最全面的掃描方式 ---
+# --- 1. 全面獲取股票代碼 (您的原始全面模式) ---
 @st.cache_data(ttl=86400)
 def get_full_market_tickers():
-    """從證交所獲取最完整清單，失敗則啟動內建 1000+ 隻保險清單"""
+    """從證交所獲取最完整清單"""
     url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
     try:
         res = requests.get(url, timeout=10, verify=False, headers={'User-Agent': 'Mozilla/5.0'})
@@ -46,18 +46,17 @@ def get_full_market_tickers():
     except:
         pass
     
-    # 保險清單 (部分列出)
-    return [f"{i:04d}.TW" for i in range(1101, 9999)] # 簡化代表，實際會執行全面掃描
+    # 強力保險：內嵌基礎清單以防爬蟲失敗
+    return [f"{i:04d}.TW" for i in range(1101, 9999)]
 
-# --- 3. 多因子評分邏輯 ---
+# --- 2. 多因子分析邏輯 (整合自您的權重系統) ---
 def analyze_stock(ticker, weights):
-    """整合 RSI, MA, 波動率, 與爆量因子"""
+    """計算多個技術因子得分"""
     try:
         df = yf.download(ticker, period="60d", interval="1d", progress=False, auto_adjust=True)
         if df.empty or len(df) < 20: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
 
-        # 計算指標
         df['RSI'] = ta.rsi(df['Close'], length=14)
         df['MA5'] = ta.sma(df['Close'], length=5)
         df['MA10'] = ta.sma(df['Close'], length=10)
@@ -66,20 +65,13 @@ def analyze_stock(ticker, weights):
         score = 0
         reasons = []
 
-        # RSI 超賣因子
         if float(curr['RSI']) < 30: 
             score += weights['rsi']; reasons.append("RSI超賣")
-        
-        # MA 金叉因子
         if float(prev['MA5']) < float(prev['MA10']) and float(curr['MA5']) > float(curr['MA10']):
             score += weights['ma']; reasons.append("MA金叉")
-            
-        # 波動率因子
         chg = ((float(curr['Close']) - float(prev['Close'])) / float(prev['Close'])) * 100
         if abs(chg) >= 7.0:
             score += weights['vol']; reasons.append(f"劇烈波動({round(chg,1)}%)")
-            
-        # 爆量因子
         if float(curr['Volume']) > df['Volume'].mean() * 2:
             score += weights['vxx']; reasons.append("爆量")
 
@@ -89,109 +81,98 @@ def analyze_stock(ticker, weights):
         }
     except: return None
 
-# --- 4. 頁面導覽 ---
-page = st.sidebar.radio("導覽選單", ["1. 全市場資金選股", "2. 多因子決策與持倉"])
+# --- UI 導航 ---
+page = st.sidebar.radio("功能選單", ["1. 全市場資金選股", "2. 多因子決策與持倉"])
 
 st.sidebar.divider()
-st.sidebar.header("🛠️ 權重與門檻設定")
+st.sidebar.header("⚙️ 因子權重分配")
 w_rsi = st.sidebar.slider("RSI 超賣權重", 0, 100, 40)
 w_ma = st.sidebar.slider("MA 金叉權重", 0, 100, 30)
 w_vol = st.sidebar.slider("劇烈波動權重", 0, 100, 20)
 w_vxx = st.sidebar.slider("成交爆量權重", 0, 100, 10)
-buy_threshold = st.sidebar.slider("買入建議門檻 (分)", 10, 100, 30)
+buy_threshold = st.sidebar.slider("買入門檻", 10, 100, 30)
 
-# --- 頁面 1：全面資金選股 ---
+# --- 頁面 1：全市場掃描 (解決卡死關鍵) ---
 if page == "1. 全市場資金選股":
-    st.title("🏆 全市場資金熱點監測")
-    st.info("此頁面採用全面掃描模式，會從證交所獲取最新清單並計算「成交值指標」。")
+    st.title("🏆 全市場資金指標排行")
     
-    if st.button("🚀 開始深度掃描 (需時較長)", type="primary"):
-        with st.spinner("正在獲取最新股票清單..."):
-            all_list = get_full_market_tickers()
-        
+    if st.button("🚀 啟動全市場深度掃描"):
+        all_list = get_full_market_tickers()
         res_rank = []
-        p_bar = st.progress(0, text="全面計算成交值中...")
+        p_bar = st.progress(0, text="正在分批獲取數據...")
         
-        batch_size = 40
+        # 使用更大的 Batch Size 並增加等待時間，避免被 Yahoo 封鎖
+        batch_size = 50 
         for i in range(0, len(all_list), batch_size):
             batch = all_list[i : i + batch_size]
-            df = yf.download(batch, period="2d", group_by='ticker', threads=True, progress=False)
-            for t in batch:
-                try:
-                    t_df = df[t].dropna() if isinstance(df.columns, pd.MultiIndex) else df.dropna()
-                    if not t_df.empty:
-                        last = t_df.iloc[-1]
-                        # 成交值指標計算
-                        val = (float(last['Close']) * float(last['Volume'])) / 1e8
-                        res_rank.append({"股票代號": t, "收盤價": float(last['Close']), "成交值(億)": val})
-                except: continue
-            time.sleep(random.uniform(0.1, 0.3)) # 防止被鎖 IP
+            try:
+                # 關鍵優化：增加 threads=True 提高速度，下載失敗不中斷程式
+                data = yf.download(batch, period="2d", group_by='ticker', threads=True, progress=False)
+                for t in batch:
+                    try:
+                        t_df = data[t].dropna() if isinstance(data.columns, pd.MultiIndex) else data.dropna()
+                        if not t_df.empty:
+                            last = t_df.iloc[-1]
+                            val = (float(last['Close']) * float(last['Volume'])) / 1e8
+                            res_rank.append({"股票代號": t, "收盤價": float(last['Close']), "成交值指標(億)": val})
+                    except: continue
+            except: pass
+            
             p_bar.progress(min((i + batch_size) / len(all_list), 1.0))
+            time.sleep(random.uniform(0.5, 1.0)) # 強制延遲，避免卡死
         
         if res_rank:
-            top_100 = pd.DataFrame(res_rank).sort_values("成交值(億)", ascending=False).head(100)
-            st.session_state.top_100_cache = top_100['股票代號'].tolist()
-            st.subheader("🔥 今日資金最集中 Top 100")
+            top_100 = pd.DataFrame(res_rank).sort_values("成交值指標(億)", ascending=False).head(100)
+            st.session_state.top_100_list = top_100['股票代號'].tolist()
             st.dataframe(top_100, use_container_width=True)
-            st.success("✅ 掃描完成！Top 100 已鎖定，請切換至第二頁進行決策。")
+            st.success("✅ 掃描完成！Top 100 已存入，請至下一頁查看。")
 
-# --- 頁面 2：多因子決策與持倉 ---
+# --- 頁面 2：交易決策 ---
 elif page == "2. 多因子決策與持倉":
-    st.title("🤖 多因子量化決策中心")
-    
-    if 'top_100_cache' not in st.session_state:
-        st.warning("⚠️ 請先在第一頁執行全市場掃描。")
+    st.title("🤖 交易決策中心")
+    if 'top_100_list' not in st.session_state:
+        st.warning("請先執行第一頁的選股掃描。")
     else:
         weights = {'rsi': w_rsi, 'ma': w_ma, 'vol': w_vol, 'vxx': w_vxx}
-        final_list = []
-        p_check = st.progress(0, text="計算多因子評分中...")
+        signals = []
+        p_check = st.progress(0, text="計算評分中...")
         
-        for idx, t in enumerate(st.session_state.top_100_cache):
+        for idx, t in enumerate(st.session_state.top_100_list):
             res = analyze_stock(t, weights)
             if res and res['總分'] > 0:
-                # 判斷動作
                 is_held = t in st.session_state.portfolio and st.session_state.portfolio[t]
                 if res['總分'] >= buy_threshold:
-                    res['建議動作'] = "🟢 建議買入"
+                    res['建議動作'] = "🟢 買入建議"
                 elif res['RSI'] > 75 and is_held:
-                    res['建議動作'] = "🔴 建議賣出"
+                    res['建議動作'] = "🔴 賣出建議"
                 else:
-                    res['建議動作'] = "⚪ 觀望"
-                final_list.append(res)
-            p_check.progress((idx + 1) / len(st.session_state.top_100_cache))
-
-        if final_list:
-            df_final = pd.DataFrame(final_list).sort_values("總分", ascending=False)
-            st.dataframe(df_final, use_container_width=True)
+                    res['建議動作'] = "觀望"
+                signals.append(res)
+            p_check.progress((idx + 1) / 100)
+        
+        if signals:
+            st.dataframe(pd.DataFrame(signals).sort_values("總分", ascending=False), use_container_width=True)
             
-            # 買賣紀錄功能
+            # 手動記錄買入
             st.divider()
-            col1, col2, col3 = st.columns(3)
-            with col1: t_select = st.selectbox("選擇股票", df_final['代號'])
-            with col2: p_select = st.number_input("成交價格", value=0.0)
-            with col3:
-                if st.button("➕ 確認買入並記錄"):
-                    if t_select not in st.session_state.portfolio: st.session_state.portfolio[t_select] = []
-                    st.session_state.portfolio[t_select].append({"price": p_select, "date": str(datetime.now().date())})
-                    save_portfolio(st.session_state.portfolio)
-                    st.rerun()
+            c1, c2 = st.columns(2)
+            with c1: t_in = st.selectbox("選股代號", [s['代碼'] for s in signals])
+            with c2: p_in = st.number_input("價格", value=0.0)
+            if st.button("➕ 加入持倉"):
+                if t_in not in st.session_state.portfolio: st.session_state.portfolio[t_in] = []
+                st.session_state.portfolio[t_in].append({"price": p_in, "date": str(datetime.now().date())})
+                save_portfolio(st.session_state.portfolio)
+                st.rerun()
 
     # --- 持倉管理 ---
     st.divider()
-    st.subheader("💼 我的持倉紀錄")
-    summary = []
-    for t, trades in st.session_state.portfolio.items():
-        if trades:
-            avg = sum([x['price'] for x in trades]) / len(trades)
-            summary.append({"代號": t, "數量": len(trades), "均價": round(avg, 2)})
-    
-    if summary:
-        df_p = pd.DataFrame(summary)
-        st.table(df_p)
-        del_t = st.selectbox("選擇移除持倉", df_p['代號'])
-        if st.button("🗑️ 執行清倉"):
-            st.session_state.portfolio[del_t] = []
+    st.subheader("💼 我的持倉")
+    p_data = [{"代號": k, "張數": len(v), "成本": round(sum([i['price'] for i in v])/len(v), 2)} 
+              for k, v in st.session_state.portfolio.items() if v]
+    if p_data:
+        st.table(pd.DataFrame(p_data))
+        t_del = st.selectbox("選擇移除", [d['代號'] for d in p_data])
+        if st.button("🗑️ 移除標的"):
+            st.session_state.portfolio[t_del] = []
             save_portfolio(st.session_state.portfolio)
             st.rerun()
-    else:
-        st.info("尚無持有股票。")
