@@ -12,16 +12,13 @@ def get_test_list():
             "2881.TW", "2882.TW", "2603.TW", "3711.TW", "2412.TW"]
 
 st.title("🧪 台股快速測試版 (10 隻股票)")
-st.caption("目標：快速驗證「成交值」欄位顯示")
+st.caption("設定：成交金額擷取至小數點後第 2 位")
 
 if st.button("執行極速掃描"):
     tickers = get_test_list()
-    st.info(f"正在掃描：{tickers}")
     
     try:
-        # 下載數據
         df = yf.download(tickers, period="5d", group_by='ticker', threads=False)
-        
         results = []
         for t in tickers:
             t_df = df[t].dropna() if isinstance(df.columns, pd.MultiIndex) else df.dropna()
@@ -29,14 +26,13 @@ if st.button("執行極速掃描"):
                 last = t_df.iloc[-1]
                 price = float(last['Close'])
                 vol = float(last['Volume'])
-                # 成交值計算
-                turnover = (price * vol) / 100_000_000
+                # 計算成交值並擷取至小數點後兩位
+                turnover = round((price * vol) / 100_000_000, 2)
                 
                 results.append({
                     "股票代號": t,
                     "收盤價": round(price, 2),
-                    "成交量(張)": int(vol // 1000),
-                    "成交金額(億)": round(turnover, 3)
+                    "成交金額(億)": turnover
                 })
         
         if results:
@@ -46,4 +42,3 @@ if st.button("執行極速掃描"):
             st.error("❌ 抓取失敗：返回數據為空。")
     except Exception as e:
         st.error(f"❌ 發生錯誤：{e}")
-        
