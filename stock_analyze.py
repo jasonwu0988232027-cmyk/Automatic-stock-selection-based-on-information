@@ -9,13 +9,13 @@ import requests
 import urllib3
 from datetime import datetime
 
-# --- 基礎設定 ---
+# --- 基礎安全設定 ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-st.set_page_config(page_title="台股自動交易監控", layout="wide")
+st.set_page_config(page_title="台股全市場自動交易系統 (RSI-7)", layout="wide")
 
 DB_FILE = "portfolio.json"
 
-# --- 1. 持倉管理 ---
+# --- 1. 持倉管理功能 (JSON) ---
 def load_portfolio():
     if os.path.exists(DB_FILE):
         try:
@@ -26,36 +26,35 @@ def load_portfolio():
 def save_portfolio(data):
     with open(DB_FILE, "w") as f: json.dump(data, f, indent=4)
 
-# --- 2. 側邊欄：用戶自定義參數 ---
-st.sidebar.header("⚙️ 策略參數設定")
-rsi_period = st.sidebar.slider("RSI 計算週期", 3, 20, 7) # 預設調整至 7
-buy_threshold = st.sidebar.slider("買進門檻 (RSI 低於)", 10, 40, 20)
-sell_threshold = st.sidebar.slider("止盈門檻 (RSI 高於)", 60, 95, 80)
-stop_loss_limit = st.sidebar.slider("硬止損比例 (%)", 5, 20, 10) / 100
-initial_cash = st.sidebar.number_input("可用資金 (用於計算買入張數)", value=1000000)
+# --- 2. 側邊欄：動態參數設定 ---
+st.sidebar.header("⚙️ 策略參數中心")
+rsi_p = st.sidebar.slider("RSI 計算週期", 3, 14, 7) # 用戶要求預設 7
+buy_rsi = st.sidebar.slider("買入門檻 (RSI 低於)", 10, 40, 20)
+sell_rsi = st.sidebar.slider("止盈門檻 (RSI 高於)", 60, 95, 80)
+sl_pct = st.sidebar.slider("硬止損比例 (%)", 5, 20, 10) / 100
 
-# --- 3. 交易邏輯 ---
+# --- 3. 交易核心邏輯 ---
 def check_trade_logic(ticker, price, rsi, portfolio):
-    if rsi is None or pd.isna(rsi): return "HOLD", "數據不足"
+    if rsi is None or pd.isna(rsi): return "HOLD", "指標無數據"
     
     rsi_val = float(rsi)
     trades = portfolio.get(ticker, [])
     avg_cost = sum([float(t['price']) for t in trades]) / len(trades) if trades else 0
     
-    # 買進判斷
-    if rsi_val < buy_threshold and len(trades) < 5:
-        return "BUY", f"RSI-{rsi_period} 超跌 ({round(rsi_val,1)})"
+    # 買進訊號
+    if rsi_val < buy_rsi and len(trades) < 5:
+        return "BUY", f"RSI-{rsi_p} 超跌 ({rsi_val:.1f})"
     
-    # 賣出判斷
+    # 賣出訊號
     if trades:
-        if price < avg_cost * (1 - stop_loss_limit):
-            return "SELL_ALL", f"跌破 {int(stop_loss_limit*100)}% 止損"
-        if rsi_val > sell_threshold:
-            return "SELL_ALL", f"RSI-{rsi_period} 過熱 ({round(rsi_val,1)})"
+        if price < avg_cost * (1 - sl_pct):
+            return "SELL_ALL", f"觸發 {int(sl_pct*100)}% 止損"
+        if rsi_val > sell_rsi:
+            return "SELL_ALL", f"RSI-{rsi_p} 過熱 ({rsi_val:.1f})"
             
     return "HOLD", "觀望"
 
-# --- 4. 選股模組 (延用您提供的 1000 隻代碼) ---
+# --- 4. 選股模組 (延用 1000 隻核心清單) ---
 @st.cache_data(ttl=86400)
 def get_full_market_tickers():
     base_codes = [
@@ -65,73 +64,95 @@ def get_full_market_tickers():
     return [t for t in extended_list if t.split('.')[0] in base_codes or int(t.split('.')[0]) < 3000]
 
 # --- 5. 主程式 ---
-st.title("📊 台股全市場量化交易監控 (RSI-7 版)")
+st.title("📈 台股全市場量化交易監控系統")
 
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = load_portfolio()
 
-# 顯示持倉
-with st.expander("💼 我的持倉清單", expanded=True):
+# 持倉顯示區
+with st.expander("💼 持倉紀錄 (來自 portfolio.json)", expanded=True):
     p_data = [{"股票": k, "批數": len(v), "平均成本": round(sum([x['price'] for x in v])/len(v), 2)} 
               for k, v in st.session_state.portfolio.items() if v]
-    st.table(pd.DataFrame(p_data)) if p_data else st.info("目前無持倉")
+    if p_data:
+        st.dataframe(pd.DataFrame(p_data), use_container_width=True)
+    else:
+        st.info("目前無任何持倉部位。")
 
-if st.button("🚀 執行全市場掃描", type="primary"):
+if st.button("🚀 啟動深度掃描", type="primary"):
     all_list = get_full_market_tickers()
     
-    # 步驟 1: 成交值排名
+    # 第一階段：成交值排名
     res_rank = []
-    p1 = st.progress(0, text="正在獲取市場成交值...")
-    for i in range(0, len(all_list), 30):
-        batch = all_list[i:i+30]
-        df = yf.download(batch, period="2d", group_by='ticker', threads=True, progress=False)
-        for t in batch:
-            try:
-                t_df = df[t].dropna() if isinstance(df.columns, pd.MultiIndex) else df.dropna()
-                if not t_df.empty:
-                    last = t_df.iloc[-1]
-                    val = (float(last['Close']) * float(last['Volume'])) / 1e8
-                    res_rank.append({"ticker": t, "price": float(last['Close']), "val": val})
-            except: continue
-        p1.progress(min((i+30)/len(all_list), 1.0))
+    p1 = st.progress(0, text="第一階段：獲取全市場成交值...")
+    batch_size = 30
+    for i in range(0, len(all_list), batch_size):
+        batch = all_list[i:i+batch_size]
+        try:
+            df = yf.download(batch, period="2d", group_by='ticker', threads=True, progress=False)
+            for t in batch:
+                try:
+                    t_df = df[t].dropna() if isinstance(df.columns, pd.MultiIndex) else df.dropna()
+                    if not t_df.empty:
+                        last = t_df.iloc[-1]
+                        val = (float(last['Close']) * float(last['Volume'])) / 1e8
+                        res_rank.append({"ticker": t, "price": float(last['Close']), "val": val})
+                except: continue
+        except: pass
+        p1.progress(min((i+batch_size)/len(all_list), 1.0))
     
     if res_rank:
         top_100 = pd.DataFrame(res_rank).sort_values("val", ascending=False).head(100)
         
-        # --- 監視面板 ---
-        st.subheader(f"📡 Top 10 熱門股 RSI-{rsi_period} 實時監測")
+        # 第二階段：監視面板與 RSI 檢查
+        st.subheader(f"📡 Top 10 熱門股 RSI-{rsi_p} 實時監視面板")
         m_cols = st.columns(5)
         
-        # 步驟 2: RSI 檢查
         final_results = []
-        p2 = st.progress(0, text="分析技術指標中...")
+        p2 = st.progress(0, text="第二階段：分析技術指標訊號...")
+        
         for idx, row in enumerate(top_100.itertuples()):
             ticker = row.ticker
-            hist = yf.download(ticker, period="1mo", interval="1d", progress=False)
-            if len(hist) < rsi_period + 5: continue
-            
-            hist['RSI'] = ta.rsi(hist['Close'], length=rsi_period)
-            curr_p, curr_rsi = float(hist['Close'].iloc[-1]), hist['RSI'].iloc[-1]
-            
-            # 面板更新
-            if idx < 10:
-                with m_cols[idx % 5]:
-                    st.metric(ticker, f"{curr_p:.1f}", f"RSI:{curr_rsi:.1f}")
+            try:
+                hist = yf.download(ticker, period="1mo", interval="1d", progress=False)
+                if len(hist) < rsi_p + 2: continue
+                
+                hist['RSI'] = ta.rsi(hist['Close'], length=rsi_p)
+                curr_p = float(hist['Close'].iloc[-1])
+                curr_rsi = hist['RSI'].iloc[-1]
+                
+                # 安全顯示面板 (防止 NaN 崩潰)
+                if idx < 10:
+                    with m_cols[idx % 5]:
+                        rsi_str = f"{curr_rsi:.1f}" if pd.notna(curr_rsi) else "N/A"
+                        st.metric(
+                            label=ticker, 
+                            value=f"{curr_p:.1f}", 
+                            delta=f"RSI: {rsi_str}",
+                            delta_color="inverse" if pd.notna(curr_rsi) and curr_rsi > sell_rsi else "normal"
+                        )
 
-            action, reason = check_trade_logic(ticker, curr_p, curr_rsi, st.session_state.portfolio)
-            if action != "HOLD":
-                final_results.append({"股票": ticker, "動作": action, "原因": reason, "價格": round(curr_p, 2), "RSI": round(curr_rsi, 1)})
-                if action == "BUY":
-                    if ticker not in st.session_state.portfolio: st.session_state.portfolio[ticker] = []
-                    st.session_state.portfolio[ticker].append({"price": curr_p, "date": str(datetime.now().date())})
-                elif action == "SELL_ALL":
-                    st.session_state.portfolio[ticker] = []
+                # 策略判斷
+                action, reason = check_trade_logic(ticker, curr_p, curr_rsi, st.session_state.portfolio)
+                if action != "HOLD":
+                    final_results.append({
+                        "股票代號": ticker, "動作": action, "原因": reason, 
+                        "目前價格": round(curr_p, 2), f"RSI-{rsi_p}": round(curr_rsi, 1) if pd.notna(curr_rsi) else "N/A"
+                    })
+                    # 更新持倉
+                    if action == "BUY":
+                        if ticker not in st.session_state.portfolio: st.session_state.portfolio[ticker] = []
+                        st.session_state.portfolio[ticker].append({"price": curr_p, "date": str(datetime.now().date())})
+                    elif action == "SELL_ALL":
+                        st.session_state.portfolio[ticker] = []
+            except: continue
             p2.progress((idx+1)/100)
             
         save_portfolio(st.session_state.portfolio)
         
         if final_results:
-            st.subheader("🚩 策略建議清單")
+            st.subheader("🚩 今日觸發買賣訊號建議")
             st.dataframe(pd.DataFrame(final_results), use_container_width=True)
         else:
-            st.success(f"🏁 掃描完成。Top 100 標的中無標的滿足 RSI-{rsi_period} 買賣條件。")
+            st.success(f"🏁 掃描完畢。今日 Top 100 資金熱點標的中，無標的符合您的參數條件。")
+    else:
+        st.error("❌ 無法獲取市場數據，請檢查網路。")
